@@ -764,7 +764,6 @@ elfldr_find_pid(const char* name) {
  **/
 int
 elfldr_read(int fd, uint8_t** elf, size_t* elf_size) {
-  const size_t max_size = 64 * 1024 * 1024;
   Elf64_Shdr *shdr;
   Elf64_Ehdr ehdr;
   uint8_t* buf;
@@ -785,8 +784,8 @@ elfldr_read(int fd, uint8_t** elf, size_t* elf_size) {
 
   if(ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
      ehdr.e_shentsize != sizeof(Elf64_Shdr) || !ehdr.e_shnum ||
-     ehdr.e_shoff < sizeof(ehdr) || ehdr.e_shoff > max_size ||
-     ehdr.e_shnum > (max_size - ehdr.e_shoff) / sizeof(Elf64_Shdr)) {
+     ehdr.e_shoff < sizeof(ehdr) ||
+     ehdr.e_shoff > SIZE_MAX - ehdr.e_shnum * sizeof(Elf64_Shdr)) {
     errno = ENOEXEC;
     return -1;
   }
@@ -809,8 +808,7 @@ elfldr_read(int fd, uint8_t** elf, size_t* elf_size) {
     if(shdr[i].sh_type == SHT_NOBITS) {
       continue;
     }
-    if(shdr[i].sh_offset > max_size ||
-       shdr[i].sh_size > max_size - shdr[i].sh_offset) {
+    if(shdr[i].sh_size > SIZE_MAX - shdr[i].sh_offset) {
       free(buf);
       errno = ENOEXEC;
       return -1;
