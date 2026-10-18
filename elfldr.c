@@ -139,7 +139,7 @@ elfldr_sanity_check(const uint8_t *elf, size_t elf_size) {
 /**
  * Load an ELF into the address space of a process with the given pid.
  **/
-static intptr_t
+intptr_t
 elfldr_load(pid_t pid, const uint8_t *elf) {
   const Elf64_Ehdr *ehdr = (const Elf64_Ehdr*)elf;
   const Elf64_Phdr *phdr = (const Elf64_Phdr*)(elf + ehdr->e_phoff);
@@ -264,7 +264,7 @@ elfldr_load(pid_t pid, const uint8_t *elf) {
 /**
  * Create payload args in the address space of the process with the given pid.
  **/
-static intptr_t
+intptr_t
 elfldr_payload_args(pid_t pid) {
   int victim_sock;
   int master_sock;
