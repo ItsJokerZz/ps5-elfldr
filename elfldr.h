@@ -26,6 +26,18 @@ pid_t elfldr_find_pid(const char* name);
 
 
 /**
+ * Load an ELF into the address space of a process with the given pid.
+ **/
+intptr_t elfldr_load(pid_t pid, const uint8_t *elf);
+
+
+/**
+ * Create payload args in the address space of the process with the given pid.
+ **/
+intptr_t elfldr_payload_args(pid_t pid);
+
+
+/**
  * Spawn a new process that executes the given ELF file.
  **/
 pid_t elfldr_spawn(int stdio, char* const argv[], const uint8_t *elf,
