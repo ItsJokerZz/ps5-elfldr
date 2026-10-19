@@ -64,6 +64,7 @@ typedef struct elfldr_ctx {
 
   intptr_t base_addr;
   size_t   base_size;
+  size_t   min_vaddr;
   void*    base_mirror;
 } elfldr_ctx_t;
 
@@ -79,8 +80,8 @@ static const char* SceSpZeroConf = "/system/vsh/app/NPXS40112/eboot.bin";
 **/
 static int
 r_relative(elfldr_ctx_t *ctx, const Elf64_Rela* rela) {
-  intptr_t* loc = ctx->base_mirror + rela->r_offset;
-  intptr_t val = ctx->base_addr + rela->r_addend;
+  intptr_t* loc = ctx->base_mirror + rela->r_offset - ctx->min_vaddr;
+  intptr_t val = ctx->base_addr - ctx->min_vaddr + rela->r_addend;
 
   *loc = val;
 
@@ -93,7 +94,7 @@ r_relative(elfldr_ctx_t *ctx, const Elf64_Rela* rela) {
  **/
 static int
 data_load(elfldr_ctx_t *ctx, const Elf64_Phdr *phdr) {
-  void* data = ctx->base_mirror + phdr->p_vaddr;
+  void* data = ctx->base_mirror + phdr->p_vaddr - ctx->min_vaddr;
 
   if(!phdr->p_memsz) {
     return 0;
@@ -137,6 +138,30 @@ elfldr_sanity_check(const uint8_t *elf, size_t elf_size) {
 
 
 /**
+ * Get the protection bits of a page, combining every segment that covers it.
+ **/
+static int
+elfldr_page_protection(const Elf64_Phdr *phdr, unsigned count, size_t page) {
+  int prot = 0;
+
+  for(unsigned i=0; i<count; i++) {
+    if(phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) {
+      continue;
+    }
+
+    size_t start = TRUNC_PG(phdr[i].p_vaddr);
+    size_t end = ROUND_PG(phdr[i].p_vaddr + phdr[i].p_memsz);
+
+    if(page >= start && page < end) {
+      prot |= PFLAGS(phdr[i].p_flags);
+    }
+  }
+
+  return prot;
+}
+
+
+/**
  * Load an ELF into the address space of a process with the given pid.
  **/
 intptr_t
@@ -154,6 +179,10 @@ elfldr_load(pid_t pid, const uint8_t *elf) {
 
   // Compute size of virtual memory region.
   for(int i=0; i<ehdr->e_phnum; i++) {
+    if(phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) {
+      continue;
+    }
+
     if(phdr[i].p_vaddr < min_vaddr) {
       min_vaddr = phdr[i].p_vaddr;
     }
@@ -163,9 +192,15 @@ elfldr_load(pid_t pid, const uint8_t *elf) {
     }
   }
 
+  if(min_vaddr == (size_t)-1) {
+    LOG_PUTS("elfldr_load: ELF has no loadable segments");
+    return 0;
+  }
+
   min_vaddr = TRUNC_PG(min_vaddr);
   max_vaddr = ROUND_PG(max_vaddr);
   ctx.base_size = max_vaddr - min_vaddr;
+  ctx.min_vaddr = min_vaddr;
 
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
   int prot = PROT_READ | PROT_WRITE;
@@ -222,27 +257,31 @@ elfldr_load(pid_t pid, const uint8_t *elf) {
     error = 1;
   }
 
-  // Set protection bits on mapped segments.
-  for(int i=0; i<ehdr->e_phnum && !error; i++) {
-    if(phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) {
-      continue;
+  // Set protection bits on mapped pages, once for each run of equal pages.
+  for(size_t page=min_vaddr; page<max_vaddr && !error;) {
+    int pbits = elfldr_page_protection(phdr, ehdr->e_phnum, page);
+    size_t end = page + PAGE_SIZE;
+
+    while(end < max_vaddr &&
+          elfldr_page_protection(phdr, ehdr->e_phnum, end) == pbits) {
+      end += PAGE_SIZE;
     }
 
-    if(phdr[i].p_flags & PF_X) {
-      if(kernel_mprotect(pid, ctx.base_addr + phdr[i].p_vaddr,
-                         ROUND_PG(phdr[i].p_memsz),
-                         PFLAGS(phdr[i].p_flags))) {
+    if(pbits & PROT_EXEC) {
+      if(kernel_mprotect(pid, ctx.base_addr + page - min_vaddr,
+                         end - page, pbits)) {
 	LOG_PERROR("kernel_mprotect");
 	error = 1;
       }
     } else {
-      if(pt_mprotect(pid, ctx.base_addr + phdr[i].p_vaddr,
-		     ROUND_PG(phdr[i].p_memsz),
-		     PFLAGS(phdr[i].p_flags))) {
+      if(pt_mprotect(pid, ctx.base_addr + page - min_vaddr,
+		     end - page, pbits)) {
 	LOG_PT_PERROR(pid, "pt_mprotect");
 	error = 1;
       }
     }
+
+    page = end;
   }
 
   if(pt_msync(pid, ctx.base_addr, ctx.base_size, MS_SYNC)) {
@@ -257,7 +296,7 @@ elfldr_load(pid_t pid, const uint8_t *elf) {
     return 0;
   }
 
-  return ctx.base_addr + ehdr->e_entry;
+  return ctx.base_addr + ehdr->e_entry - min_vaddr;
 }
 
 
