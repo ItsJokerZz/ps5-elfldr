@@ -44,6 +44,7 @@ along with this program; see the file COPYING. If not, see
 #define PAYLOAD_MAGIC_PS4_SELF 0x1D3D154F // PS4 SELF payload
 #define PAYLOAD_MAGIC_PS5_SELF 0xEEF51454 // PS5 SELF payload
 #define PAYLOAD_MAGIC_HTTP_GET 0x20544547 // HTTP GET request
+#define PAYLOAD_MAGIC_HTTP_POST 0x54534F50 // HTTP POST request
 
 
 /**
@@ -224,6 +225,180 @@ payload_readhttp(int fd, char* uri, size_t size) {
 
 
 /**
+ * Send a HTTP error response, and set errno to the given error.
+ **/
+static int
+http_error(int fd, const char* status, int err) {
+  char buf[255];
+  int n;
+
+  n = snprintf(buf, sizeof(buf),
+	       "HTTP/1.1 %s\r\n"
+	       "Access-Control-Allow-Origin: *\r\n"
+	       "Content-Length: 0\r\n"
+	       "Connection: close\r\n"
+	       "\r\n", status);
+  write(fd, buf, n);
+  errno = err;
+
+  return -1;
+}
+
+
+/**
+ * Receive exactly len bytes from a socket.
+ **/
+static int
+http_recv(int fd, void* buf, size_t len) {
+  ssize_t n = recv(fd, buf, len, MSG_WAITALL);
+
+  if(n == len) {
+    return 0;
+  }
+
+  if(n >= 0) {
+    errno = ECONNRESET;
+  }
+
+  return -1;
+}
+
+
+/**
+ * Get the value of a header in a HTTP request, or NULL if it is missing.
+ **/
+static const char*
+http_header(const char* request, const char* name) {
+  size_t len = strlen(name);
+  const char* p = request;
+
+  while((p=strstr(p, "\r\n"))) {
+    p += 2;
+    if(!strncasecmp(p, name, len) && p[len] == ':') {
+      p += len + 1;
+      while(*p == ' ' || *p == '\t') {
+        p++;
+      }
+      return p;
+    }
+  }
+
+  return 0;
+}
+
+
+/**
+ * Read a HTTP (POST) request, where the body is the payload to spawn.
+ **/
+static int
+payload_readpost(int fd, char* uri, size_t size,
+		 uint8_t** payload, size_t* payload_size) {
+  const char *headers = ("HTTP/1.1 200 OK\r\n"
+			 "Content-Type: text/x-log; charset=utf-8\r\n"
+			 "Cache-Control: no-cache\r\n"
+			 "Access-Control-Allow-Origin: *\r\n"
+			 "Connection: close\r\n"
+			 "\r\n");
+  const char *cont = "HTTP/1.1 100 Continue\r\n\r\n";
+  char buf[4096] = {0};
+  const char* target;
+  const char* value;
+  uint8_t* body;
+  size_t length;
+  size_t n = 0;
+  char* end;
+  char* p;
+  int magic;
+
+  while(n < sizeof(buf)-1) {
+    if(http_recv(fd, buf+n, 1)) {
+      return -1;
+    }
+
+    n++;
+    if(n >= 4 && !memcmp(buf+n-4, "\r\n\r\n", 4)) {
+      break;
+    }
+  }
+
+  if(memcmp(buf+n-4, "\r\n\r\n", 4)) {
+    return http_error(fd, "431 Request Header Fields Too Large", EMSGSIZE);
+  }
+
+  if(memcmp(buf, "POST /", 6)) {
+    return http_error(fd, "400 Bad Request", EINVAL);
+  }
+
+  target = buf + 5;
+  if(!(p=memchr(target, ' ', strstr(buf, "\r\n")-target))) {
+    return http_error(fd, "400 Bad Request", EINVAL);
+  }
+
+  if(p-target >= size) {
+    return http_error(fd, "414 URI Too Long", ENAMETOOLONG);
+  }
+
+  memcpy(uri, target, p-target);
+  uri[p-target] = 0;
+
+  if(http_header(buf, "Transfer-Encoding")) {
+    return http_error(fd, "501 Not Implemented", ENOTSUP);
+  }
+
+  if(!(value=http_header(buf, "Content-Length"))) {
+    return http_error(fd, "411 Length Required", EINVAL);
+  }
+
+  if(*value < '0' || *value > '9') {
+    return http_error(fd, "400 Bad Request", EINVAL);
+  }
+
+  errno = 0;
+  length = strtoull(value, &end, 10);
+  if(errno == ERANGE) {
+    return http_error(fd, "413 Payload Too Large", EFBIG);
+  }
+
+  if(*end != '\r' && *end != ' ' && *end != '\t') {
+    return http_error(fd, "400 Bad Request", EINVAL);
+  }
+
+  if(length < sizeof(magic)) {
+    return http_error(fd, "400 Bad Request", EINVAL);
+  }
+
+  if(!(body=malloc(length))) {
+    return http_error(fd, "413 Payload Too Large", ENOMEM);
+  }
+
+  if((value=http_header(buf, "Expect")) &&
+     !strncasecmp(value, "100-continue", 12)) {
+    write(fd, cont, strlen(cont));
+  }
+
+  if(http_recv(fd, body, length)) {
+    free(body);
+    return -1;
+  }
+
+  memcpy(&magic, body, sizeof(magic));
+  if(magic != PAYLOAD_MAGIC_ELF &&
+     magic != PAYLOAD_MAGIC_PS4_SELF &&
+     magic != PAYLOAD_MAGIC_PS5_SELF) {
+    free(body);
+    return http_error(fd, "415 Unsupported Media Type", ENOEXEC);
+  }
+
+  write(fd, headers, strlen(headers));
+
+  *payload = body;
+  *payload_size = length;
+
+  return 0;
+}
+
+
+/**
  * Process connection input.
  **/
 static void
@@ -260,6 +435,11 @@ on_connection(int fd) {
       write(fd, "[elfldr.elf] Error reading HTTP payload\n\r\0", 42);
     }
 
+  } else if(magic == PAYLOAD_MAGIC_HTTP_POST) {
+    if(payload_readpost(fd, uri, PATH_MAX, &buf, &len)) {
+      LOG_PERROR("payload_readpost");
+    }
+
   } else if(magic == PAYLOAD_MAGIC_ELF) {
     if(elfldr_read(fd, &buf, &len)) {
       LOG_PERROR("elfldr_read");
@@ -276,7 +456,9 @@ on_connection(int fd) {
   }
 
   if(buf) {
-    if(!(filename=uri_get_filename(uri))) {
+    filename = uri_get_filename(uri);
+    if(!filename || !*filename) {
+      free(filename);
       filename = strdup("payload.elf");
     }
     if(!(args=uri_get_param(uri, "args"))) {
