@@ -25,6 +25,7 @@ along with this program; see the file COPYING. If not, see
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 
 #include <ps5/kernel.h>
 
@@ -45,6 +46,12 @@ along with this program; see the file COPYING. If not, see
 #define PAYLOAD_MAGIC_PS5_SELF 0xEEF51454 // PS5 SELF payload
 #define PAYLOAD_MAGIC_HTTP_GET 0x20544547 // HTTP GET request
 #define PAYLOAD_MAGIC_HTTP_POST 0x54534F50 // HTTP POST request
+
+
+/**
+ * Seconds a client may stay silent while a payload is being received.
+ **/
+#define RECV_TIMEOUT 10
 
 
 /**
@@ -399,6 +406,20 @@ payload_readpost(int fd, char* uri, size_t size,
 
 
 /**
+ * Set how long a receive on a socket may wait for data, in seconds, or 0 to
+ * wait forever.
+ **/
+static void
+recv_timeout(int fd, time_t seconds) {
+  struct timeval tv = {.tv_sec = seconds};
+
+  if(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+    LOG_PERROR("setsockopt");
+  }
+}
+
+
+/**
  * Process connection input.
  **/
 static void
@@ -416,6 +437,8 @@ on_connection(int fd) {
     LOG_PERROR("setsockopt");
     return;
   }
+
+  recv_timeout(fd, RECV_TIMEOUT);
 
   if(recv(fd, &magic, sizeof(magic), MSG_PEEK | MSG_WAITALL) != sizeof(magic)) {
     LOG_PERROR("recv");
@@ -456,6 +479,8 @@ on_connection(int fd) {
   }
 
   if(buf) {
+    recv_timeout(fd, 0);
+
     filename = uri_get_filename(uri);
     if(!filename || !*filename) {
       free(filename);
