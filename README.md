@@ -35,6 +35,12 @@ john@localhost:~$ export PS5_PAYLOAD=https://github.com/ps5-payload-dev/ftpsrv/r
 john@localhost:~$ curl "http://$PS5_HOST:$PS5_PORT?uri=$PS5_PAYLOAD"
 ```
 
+A payload URI accepts query parameters, e.g., `file:/data/payload.elf?args=-v&pipe=0`:
+- `args`: command line arguments for the payload, separated by spaces (a space
+  that belongs to an argument is escaped with a backslash).
+- `pipe`: set to `0`, `false` or `no` to keep the standard output of the payload
+  from being redirected to the connection.
+
 ## Building
 Assuming you have the [ps5-payload-sdk][sdk] installed on a Debian-flavored
 operating system, ps5-payload-elfldr can be compiled using the following
