@@ -244,15 +244,20 @@ on_connection(int fd) {
   int optval = 1;
   char* args = "";
   char* pipe = "";
+  int stdio = fd;
   int magic = 0;
+  ssize_t n;
 
   if(setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval)) < 0) {
     LOG_PERROR("setsockopt");
     return;
   }
 
-  if(recv(fd, &magic, sizeof(magic), MSG_PEEK | MSG_WAITALL) != sizeof(magic)) {
-    LOG_PERROR("recv");
+  if((n=recv(fd, &magic, sizeof(magic), MSG_PEEK | MSG_WAITALL)) !=
+     sizeof(magic)) {
+    if(n < 0) {
+      LOG_PERROR("recv");
+    }
     write(fd, "[elfldr.elf] Unknown payload format\n\r\0", 38);
     return;
   }
@@ -298,10 +303,10 @@ on_connection(int fd) {
     if(!strcmp(pipe, "0") ||
        !strcasecmp(pipe, "false") ||
        !strcasecmp(pipe, "no")) {
-      fd = -1;
+      stdio = -1;
     }
 
-    if(payload_spawn(filename, args, fd, buf, len) < 0) {
+    if(payload_spawn(filename, args, stdio, buf, len) < 0) {
       write(fd, "[elfldr.elf] Error spawning payload\n\r\0", 38);
     }
     free(filename);
@@ -330,6 +335,7 @@ serve_elfldr(uint16_t port) {
 
   if(setsockopt(srvfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
     LOG_PERROR("setsockopt");
+    close(srvfd);
     return -1;
   }
 
@@ -340,11 +346,13 @@ serve_elfldr(uint16_t port) {
 
   if(bind(srvfd, (struct sockaddr*)&srvaddr, sizeof(srvaddr)) != 0) {
     LOG_PERROR("bind");
+    close(srvfd);
     return -1;
   }
 
   if(listen(srvfd, 5) != 0) {
     LOG_PERROR("listen");
+    close(srvfd);
     return -1;
   }
 
