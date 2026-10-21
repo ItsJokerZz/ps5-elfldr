@@ -218,7 +218,7 @@ http_get(const char* url, size_t* len) {
     return 0;
   }
 
-  http_fini(&ctx);;
+  http_fini(&ctx);
   if(len) {
     *len = size;
   }
