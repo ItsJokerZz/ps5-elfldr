@@ -487,6 +487,7 @@ elfldr_prepare_exec(pid_t pid, const uint8_t *elf) {
  **/
 static int
 elfldr_set_procname(pid_t pid, const char* name) {
+  char comm[MAXCOMLEN+1];
   intptr_t buf;
 
   if((buf=pt_mmap(pid, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
@@ -495,7 +496,10 @@ elfldr_set_procname(pid_t pid, const char* name) {
     return -1;
   }
 
-  pt_copyin(pid, name, buf, strlen(name)+1);
+  strncpy(comm, name, sizeof(comm)-1);
+  comm[sizeof(comm)-1] = 0;
+
+  pt_copyin(pid, comm, buf, strlen(comm)+1);
   pt_syscall(pid, SYS_thr_set_name, -1, buf);
   pt_msync(pid, buf, PAGE_SIZE, MS_SYNC);
   pt_munmap(pid, buf, PAGE_SIZE);
