@@ -80,8 +80,16 @@ static const char* SceSpZeroConf = "/system/vsh/app/NPXS40112/eboot.bin";
 **/
 static int
 r_relative(elfldr_ctx_t *ctx, const Elf64_Rela* rela) {
-  intptr_t* loc = ctx->base_mirror + rela->r_offset - ctx->min_vaddr;
-  intptr_t val = ctx->base_addr - ctx->min_vaddr + rela->r_addend;
+  intptr_t* loc;
+  intptr_t val;
+
+  if(rela->r_offset < ctx->min_vaddr || ctx->base_size < sizeof(*loc) ||
+     rela->r_offset - ctx->min_vaddr > ctx->base_size - sizeof(*loc)) {
+    return -1;
+  }
+
+  loc = ctx->base_mirror + rela->r_offset - ctx->min_vaddr;
+  val = ctx->base_addr - ctx->min_vaddr + rela->r_addend;
 
   *loc = val;
 
@@ -94,7 +102,7 @@ r_relative(elfldr_ctx_t *ctx, const Elf64_Rela* rela) {
  **/
 static int
 data_load(elfldr_ctx_t *ctx, const Elf64_Phdr *phdr) {
-  void* data = ctx->base_mirror + phdr->p_vaddr - ctx->min_vaddr;
+  void* data;
 
   if(!phdr->p_memsz) {
     return 0;
@@ -104,32 +112,85 @@ data_load(elfldr_ctx_t *ctx, const Elf64_Phdr *phdr) {
     return 0;
   }
 
+  if(phdr->p_filesz > phdr->p_memsz || phdr->p_vaddr < ctx->min_vaddr ||
+     phdr->p_vaddr - ctx->min_vaddr > ctx->base_size ||
+     phdr->p_filesz > ctx->base_size - (phdr->p_vaddr - ctx->min_vaddr)) {
+    return -1;
+  }
+
+  data = ctx->base_mirror + phdr->p_vaddr - ctx->min_vaddr;
   memcpy(data, ctx->elf+phdr->p_offset, phdr->p_filesz);
 
   return 0;
 }
 
 
+/**
+ * Check that the range [off, off+len) lies inside a buffer of the given size.
+ **/
+static int
+elfldr_in_bounds(uint64_t off, uint64_t len, size_t size) {
+  return off <= size && len <= size - off;
+}
+
+
+/**
+ * Ensure the data is a well-formed ELF, so that the program and section
+ * headers, the segments, and the relocation tables can be read without
+ * leaving the buffer.
+ **/
 int
 elfldr_sanity_check(const uint8_t *elf, size_t elf_size) {
   const Elf64_Ehdr *ehdr = (const Elf64_Ehdr*)elf;
   const Elf64_Phdr *phdr;
+  const Elf64_Shdr *shdr;
 
-  if(elf_size < sizeof(Elf64_Ehdr) ||
-     elf_size < sizeof(Elf64_Phdr) + ehdr->e_phoff ||
-     elf_size < sizeof(Elf64_Shdr) + ehdr->e_shoff) {
+  if(elf_size < sizeof(Elf64_Ehdr)) {
     return -1;
   }
 
   if(ehdr->e_ident[0] != 0x7f || ehdr->e_ident[1] != 'E' ||
-     ehdr->e_ident[2] != 'L'  || ehdr->e_ident[3] != 'F') {
+     ehdr->e_ident[2] != 'L'  || ehdr->e_ident[3] != 'F' ||
+     ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
     return -1;
   }
 
-  phdr = (const Elf64_Phdr*)(elf + ehdr->e_phoff);
-  for(int i=0; i<ehdr->e_phnum; i++) {
-    if(phdr[i].p_offset + phdr[i].p_filesz > elf_size) {
+  if(ehdr->e_phnum) {
+    if(ehdr->e_phentsize != sizeof(Elf64_Phdr) ||
+       !elfldr_in_bounds(ehdr->e_phoff,
+                         (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr),
+                         elf_size)) {
       return -1;
+    }
+
+    phdr = (const Elf64_Phdr*)(elf + ehdr->e_phoff);
+    for(int i=0; i<ehdr->e_phnum; i++) {
+      if(!elfldr_in_bounds(phdr[i].p_offset, phdr[i].p_filesz, elf_size)) {
+        return -1;
+      }
+
+      if(phdr[i].p_type == PT_LOAD &&
+         (phdr[i].p_filesz > phdr[i].p_memsz ||
+          phdr[i].p_memsz > UINT64_MAX - phdr[i].p_vaddr)) {
+        return -1;
+      }
+    }
+  }
+
+  if(ehdr->e_shnum) {
+    if(ehdr->e_shentsize != sizeof(Elf64_Shdr) ||
+       !elfldr_in_bounds(ehdr->e_shoff,
+                         (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr),
+                         elf_size)) {
+      return -1;
+    }
+
+    shdr = (const Elf64_Shdr*)(elf + ehdr->e_shoff);
+    for(int i=0; i<ehdr->e_shnum; i++) {
+      if(shdr[i].sh_type == SHT_RELA &&
+         !elfldr_in_bounds(shdr[i].sh_offset, shdr[i].sh_size, elf_size)) {
+        return -1;
+      }
     }
   }
 
@@ -243,7 +304,7 @@ elfldr_load(pid_t pid, const uint8_t *elf) {
     }
 
     const Elf64_Rela* rela = (const Elf64_Rela*)(elf + shdr[i].sh_offset);
-    for(int j=0; j<shdr[i].sh_size/sizeof(Elf64_Rela); j++) {
+    for(int j=0; j<shdr[i].sh_size/sizeof(Elf64_Rela) && !error; j++) {
       switch(rela[j].r_info & 0xffffffffl) {
       case R_X86_64_RELATIVE:
 	error = r_relative(&ctx, &rela[j]);
@@ -670,6 +731,7 @@ elfldr_spawn(int stdio, char* const argv[], const uint8_t* elf, size_t payload_s
   EV_SET(&evt, pid, EVFILT_PROC, EV_ADD, NOTE_EXEC, 0, 0);
   if(kevent(kq, &evt, 1, &evt, 1, 0) < 0) {
     LOG_PERROR("kevent");
+    kill(pid, SIGKILL);
     free(stack);
     close(kq);
     return -1;
@@ -677,6 +739,7 @@ elfldr_spawn(int stdio, char* const argv[], const uint8_t* elf, size_t payload_s
 
   if(waitpid(pid, 0, 0) < 0) {
     LOG_PERROR("waitpid");
+    kill(pid, SIGKILL);
     free(stack);
     close(kq);
     return -1;
