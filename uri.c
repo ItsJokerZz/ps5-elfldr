@@ -79,6 +79,7 @@ http_init(http_ctx_t* ctx, const char* agent, const char* url) {
   ctx->libsslCtxId  = -1;
   ctx->libhttpCtxId = -1;
   ctx->tmplId       = -1;
+  ctx->connId       = -1;
   ctx->reqId        = -1;
 
   if((err=sceNetInit()) < 0) {
@@ -127,7 +128,10 @@ http_init(http_ctx_t* ctx, const char* agent, const char* url) {
  **/
 static int
 http_request(http_ctx_t* ctx, uint8_t** data, size_t* len) {
+  uint64_t length = 0;
+  size_t off = 0;
   int status = -1;
+  int result;
   int err;
   int n;
 
@@ -137,22 +141,33 @@ http_request(http_ctx_t* ctx, uint8_t** data, size_t* len) {
   if((err=sceHttpGetStatusCode(ctx->reqId, &status))) {
     return err;
   }
-  if((err=sceHttpGetResponseContentLength(ctx->reqId, &err, len))) {
+  if((err=sceHttpGetResponseContentLength(ctx->reqId, &result, &length))) {
     return err;
   }
 
-  if(!len || status != 200) {
+  if(!length || status != 200) {
     // TODO: support resources without a content length
-    return status;
+    return status == 200 ? -1 : status;
   }
 
-  if(!(*data=malloc(*len))) {
+  if(!(*data=malloc(length))) {
     return -1;
   }
 
-  if((n=sceHttpReadData(ctx->reqId, *data, *len) < 0)) {
-    return n;
+  while(off < length) {
+    if((n=sceHttpReadData(ctx->reqId, *data+off, length-off)) <= 0) {
+      break;
+    }
+    off += n;
   }
+
+  if(off != length) {
+    free(*data);
+    *data = 0;
+    return -1;
+  }
+
+  *len = length;
 
   return status;
 }
@@ -236,19 +251,17 @@ path_read(const char* path, uint8_t** content, size_t* content_size) {
   if(!(f=fopen(path, "rb"))) {
     return -1;
   }
-  if(fseek(f, 0, SEEK_END)) {
+  if(fseek(f, 0, SEEK_END) || (size=ftell(f)) < 0 ||
+     fseek(f, 0, SEEK_SET)) {
+    fclose(f);
     return -1;
   }
-  if((size=ftell(f)) < 0) {
-    return -1;
-  }
-  if(fseek(f, 0, SEEK_SET)) {
-    return -1;
-  }
-  if(!(buf=malloc(size))) {
+  if(!(buf=malloc(size ? size : 1))) {
+    fclose(f);
     return -1;
   }
   if(fread(buf, 1, size, f) != size) {
+    fclose(f);
     free(buf);
     return -1;
   }
