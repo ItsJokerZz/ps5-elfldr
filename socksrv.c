@@ -123,15 +123,24 @@ args_split(const char* args, char** argv, size_t size) {
 static pid_t
 payload_spawn(char* filename, char* args, int fd,
 	      uint8_t* payload, size_t payload_size) {
-  int magic = *((int*)payload);
   char* argv[255+2] = {0};
   pid_t pid = -1;
+  int magic;
 
+  if(payload_size < sizeof(magic)) {
+    return -1;
+  }
+
+  magic = *((int*)payload);
   argv[0] = filename;
   args_split(args, argv+1, 255);
 
   if(magic == PAYLOAD_MAGIC_ELF) {
-    pid = elfldr_spawn(fd, argv, payload, payload_size);
+    if(elfldr_sanity_check(payload, payload_size)) {
+      LOG_PUTS("payload_spawn: malformed ELF");
+    } else {
+      pid = elfldr_spawn(fd, argv, payload, payload_size);
+    }
 
   } else if(magic == PAYLOAD_MAGIC_PS4_SELF || magic == PAYLOAD_MAGIC_PS5_SELF) {
     pid = selfldr_spawn(fd, argv, payload, payload_size);
