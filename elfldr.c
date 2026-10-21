@@ -731,6 +731,7 @@ elfldr_spawn(int stdio, char* const argv[], const uint8_t* elf, size_t payload_s
   EV_SET(&evt, pid, EVFILT_PROC, EV_ADD, NOTE_EXEC, 0, 0);
   if(kevent(kq, &evt, 1, &evt, 1, 0) < 0) {
     LOG_PERROR("kevent");
+    kill(pid, SIGKILL);
     free(stack);
     close(kq);
     return -1;
@@ -738,6 +739,7 @@ elfldr_spawn(int stdio, char* const argv[], const uint8_t* elf, size_t payload_s
 
   if(waitpid(pid, 0, 0) < 0) {
     LOG_PERROR("waitpid");
+    kill(pid, SIGKILL);
     free(stack);
     close(kq);
     return -1;
