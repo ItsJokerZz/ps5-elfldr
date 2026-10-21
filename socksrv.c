@@ -253,21 +253,31 @@ http_error(int fd, const char* status, int err) {
 
 
 /**
- * Receive exactly len bytes from a socket.
+ * Receive exactly len bytes from a socket. The data is received in chunks, so
+ * that the receive timeout of the socket applies to the time a client is idle,
+ * not to the time it takes to upload the whole body.
  **/
 static int
 http_recv(int fd, void* buf, size_t len) {
-  ssize_t n = recv(fd, buf, len, MSG_WAITALL);
+  uint8_t* p = buf;
 
-  if(n == len) {
-    return 0;
+  while(len) {
+    size_t chunk = len < 0x10000 ? len : 0x10000;
+    ssize_t n = recv(fd, p, chunk, MSG_WAITALL);
+
+    if(n != chunk) {
+      if(n >= 0) {
+        errno = ECONNRESET;
+      }
+
+      return -1;
+    }
+
+    p += n;
+    len -= n;
   }
 
-  if(n >= 0) {
-    errno = ECONNRESET;
-  }
-
-  return -1;
+  return 0;
 }
 
 
